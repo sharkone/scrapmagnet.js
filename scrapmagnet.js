@@ -159,6 +159,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       infoHash:     magnetData.infoHash,
       mixpanelData: mixpanelData,
       ready:        false,
+      pieceMap:     [],
       finished:     false,
       connections:  0,
 
@@ -252,16 +253,16 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       torrent.engine.select(torrent.engine.torrent.pieces.length - 1, torrent.engine.torrent.pieces.length - 1, true);
 
       // Initialize piece map
-      torrent.pieceMap = Array(torrent.engine.torrent.pieces.length);
-      for (var i = 0; i < torrent.pieceMap.length; i++)
-        torrent.pieceMap[i] = '.';
+      for (var i = 0; i < torrent.engine.torrent.pieces.length; i++)
+        if (!torrent.pieceMap[i])
+          torrent.pieceMap[i] = '.';
 
       clearTimeout(torrent.metadataTimeout);
       console.log('[scrapmagnet] ' + torrent.dn + ': METADATA RECEIVED');
       trackingEvent('Metadata received', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
     });
 
-    torrent.engine.on('download', function(pieceIndex) {
+    torrent.engine.on('verify', function(pieceIndex) {
       torrent.pieceMap[pieceIndex] = '*';
     });
 
