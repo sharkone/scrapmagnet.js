@@ -159,6 +159,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       infoHash:     magnetData.infoHash,
       mixpanelData: mixpanelData,
       ready:        false,
+      paused:       false,
       pieceMap:     [],
       finished:     false,
       connections:  0,
@@ -178,10 +179,22 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       },
 
       addConnection: function() {
-        if (this.timeout) {
-          clearTimeout(this.timeout);
-          this.timeout = undefined;
+        if (this.pauseTimeout) {
+          clearTimeout(this.pauseTimeout);
+          this.pauseTimeout = undefined;
+
+          if (this.mainFile && this.paused) {
+            this.mainFile.select();
+            this.paused = false;
+            console.log('[scrapmagnet] ' + this.dn + ': RESUMED');
+          }
         }
+
+        if (this.removeTimeout) {
+          clearTimeout(this.removeTimeout);
+          this.removeTimeout = undefined;
+        }
+
         this.connections++;
       },
 
@@ -190,8 +203,16 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
           this.connections--;
           if (this.connections == 0) {
             var self = this;
-            this.timeout = setTimeout(function() {
-              self.destroy();
+
+            this.pauseTimeout = setTimeout(function() {
+              if (self.mainFile && !self.paused) {
+                self.mainFile.deselect();
+                self.paused = true;
+                console.log('[scrapmagnet] ' + self.dn + ': PAUSED');
+              }
+              self.removeTimeout = setTimeout(function() {
+                self.destroy();
+              }, 60000);
             }, 10000);
           }
         }
@@ -202,6 +223,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
           dn:             this.dn,
           info_hash:      this.infoHash,
           ready:          this.ready,
+          paused:         this.paused,
           downloaded:     this.engine.swarm.downloaded,
           uploaded:       this.engine.swarm.uploaded,
           download_speed: this.engine.swarm.downloadSpeed() / 1024,
@@ -267,7 +289,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
     });
 
     torrent.engine.on('idle', function() {
-      if (!torrent.finished) {
+      if (!torrent.finished && !torrent.paused) {
         torrent.finished = true;
         console.log('[scrapmagnet] ' + torrent.dn + ': FINISHED');
         trackingEvent('Finished', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
