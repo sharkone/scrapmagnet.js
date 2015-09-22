@@ -233,7 +233,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
         peers:          this.engine.swarm.wires.length,
       };
 
-      if (this.state == 'downloading') {
+      if (this.state == 'downloading' || this.state == 'finished') {
         info.files = [];
 
         var self = this;
