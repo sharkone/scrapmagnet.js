@@ -17,7 +17,7 @@ var torrentStream = require('torrent-stream');
 // ----------------------------------------------------------------------------
 
 commander
-  .version('0.1.1')
+  .version('0.1.2')
   .option('-p, --port <port>', 'HTTP server port [8042]', Number, 8042)
   .option('-k, --keep', 'Keep downloaded files upon stopping')
   .option('-i, --ppid <ppid>', 'Parent PID to monitor for auto-shutdown', Number, -1)

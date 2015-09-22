@@ -1,7 +1,7 @@
 {
   "name": "scrapmagnet.js",
   "description": "Magnet link streamer written with Node.js.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Thomas Texier (@sharkone)",
   "license": "MIT",
   "homepage": "https://github.com/sharkone/scrapmagnet.js",
