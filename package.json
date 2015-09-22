@@ -20,6 +20,7 @@
     "url": "https://github.com/sharkone/scrapmagnet.js/issues"
   },
   "dependencies": {
+    "async": "^1.4.2",
     "commander": "^2.8.1",
     "express": "^4.13.3",
     "is-running": "^1.0.5",
@@ -30,6 +31,7 @@
     "pump": "^1.0.0",
     "range-parser": "^1.0.2",
     "request": "^2.62.0",
+    "stream-meter": "^1.0.3",
     "torrent-stream": "^1.0.0"
   }
 }

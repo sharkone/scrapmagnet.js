@@ -1,3 +1,4 @@
+var async         = require('async');
 var commander     = require('commander');
 var crypto        = require('crypto');
 var express       = require('express');
@@ -10,6 +11,7 @@ var os            = require('os');
 var pump          = require('pump');
 var rangeParser   = require('range-parser');
 var request       = require('request');
+var streamMeter   = require("stream-meter");
 var torrentStream = require('torrent-stream');
 
 // ----------------------------------------------------------------------------
@@ -123,29 +125,48 @@ app.get('/video', function(req, res) {
     torrent.removeConnection();
   });
 
-  if (torrent.ready)
-  {
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', mime.lookup.bind(mime)(torrent.mainFile.name));
-    res.setHeader('transferMode.dlna.org', 'Streaming');
-    res.setHeader('contentFeatures.dlna.org', 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=017000 00000000000000000000000000');
+  switch (torrent.state) {
+    case 'downloading':
+    case 'finished':
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', mime.lookup.bind(mime)(torrent.mainFile.name));
+      res.setHeader('transferMode.dlna.org', 'Streaming');
+      res.setHeader('contentFeatures.dlna.org', 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=017000 00000000000000000000000000');
 
-    var range = req.headers.range;
-    range = range && rangeParser(torrent.mainFile.length, range)[0];
+      var range = req.headers.range;
+      range = range && rangeParser(torrent.mainFile.length, range)[0];
 
-    if (!range) {
-      res.setHeader('Content-Length', torrent.mainFile.length);
-      pump(torrent.mainFile.createReadStream(), res);
-    } else {
-      res.statusCode = 206
-      res.setHeader('Content-Length', range.end - range.start + 1);
-      res.setHeader('Content-Range', 'bytes ' + range.start + '-' + range.end + '/' + torrent.mainFile.length);
-      pump(torrent.mainFile.createReadStream(range), res);
-    }
-  } else {
-    setTimeout(function() {
-      res.redirect(307, req.url);
-    }, 1000);
+      torrent.meter = streamMeter();
+      torrent.meterInterval = setInterval(function() {
+        if (torrent.meter.bytes > (10 * 1024 * 1024)) {
+          clearInterval(torrent.meterInterval);
+          if (!torrent.serving) {
+            torrent.serving = true;
+            console.log('[scrapmagnet] ' + torrent.dn + ': SERVING');
+            trackingEvent('Serving', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
+          }
+        }
+      }, 1000);
+
+      if (!range) {
+        res.setHeader('Content-Length', torrent.mainFile.length);
+        pump(torrent.mainFile.createReadStream(), torrent.meter, res);
+      } else {
+        res.status(206);
+        res.setHeader('Content-Length', range.end - range.start + 1);
+        res.setHeader('Content-Range', 'bytes ' + range.start + '-' + range.end + '/' + torrent.mainFile.length);
+        pump(torrent.mainFile.createReadStream(range), torrent.meter, res);
+      }
+
+      break;
+    case 'failed':
+      res.sendStatus(404);
+      break;
+    case 'metadata':
+      setTimeout(function() {
+        res.redirect(307, req.url);
+      }, 1000);
+      break;
   }
 });
 
@@ -158,112 +179,119 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       dn:           magnetData.dn,
       infoHash:     magnetData.infoHash,
       mixpanelData: mixpanelData,
-      ready:        false,
+      state:        'metadata',
+      connections:  0,
       paused:       false,
       pieceMap:     [],
-      finished:     false,
-      connections:  0,
-
-      destroy: function() {
-        var self = this;
-        this.engine.destroy(function() {
-          console.log('[scrapmagnet] ' + self.dn + ': REMOVED');
-          trackingEvent('Removed', { 'Magnet InfoHash': self.infoHash, 'Magnet Name': self.dn }, self.mixpanelData);
-          if (!commander.keep) {
-            self.engine.remove(function() {
-              console.log('[scrapmagnet] ' + self.dn + ': DELETED');
-            });
-          }
-        });
-        delete torrents[this.infoHash];
-      },
-
-      addConnection: function() {
-        if (this.pauseTimeout) {
-          clearTimeout(this.pauseTimeout);
-          this.pauseTimeout = undefined;
-
-          if (this.mainFile && this.paused) {
-            this.mainFile.select();
-            this.paused = false;
-            console.log('[scrapmagnet] ' + this.dn + ': RESUMED');
-          }
-        }
-
-        if (this.removeTimeout) {
-          clearTimeout(this.removeTimeout);
-          this.removeTimeout = undefined;
-        }
-
-        this.connections++;
-      },
-
-      removeConnection: function() {
-        if (this.connections > 0) {
-          this.connections--;
-          if (this.connections == 0) {
-            var self = this;
-
-            this.pauseTimeout = setTimeout(function() {
-              if (self.mainFile && !self.paused) {
-                self.mainFile.deselect();
-                self.paused = true;
-                console.log('[scrapmagnet] ' + self.dn + ': PAUSED');
-              }
-              self.removeTimeout = setTimeout(function() {
-                self.destroy();
-              }, 60000);
-            }, 10000);
-          }
-        }
-      },
-
-      getInfo: function() {
-        var info = {
-          dn:             this.dn,
-          info_hash:      this.infoHash,
-          ready:          this.ready,
-          paused:         this.paused,
-          downloaded:     this.engine.swarm.downloaded,
-          uploaded:       this.engine.swarm.uploaded,
-          download_speed: this.engine.swarm.downloadSpeed() / 1024,
-          upload_speed:   this.engine.swarm.uploadSpeed() / 1024,
-          peers:          this.engine.swarm.wires.length,
-        };
-
-        if (this.ready) {
-          info.files = [];
-
-          var self = this;
-          this.engine.files.forEach(function(file) {
-            info.files.push({ path: file.path, size: file.length, main: (file.path == self.mainFile.path) });
-          });
-
-          info.pieces       = this.engine.torrent.pieces.length,
-          info.piece_length = this.engine.torrent.pieceLength,
-          info.piece_map    = Array(Math.ceil(info.pieces / 100));
-
-          for (var i = 0; i < info.piece_map.length; i++)
-            info.piece_map[i] = '';
-
-          for (var i = 0; i < info.pieces; i++)
-            info.piece_map[Math.floor(i / 100)] += this.pieceMap[i];
-
-          info.video_ready = this.pieceMap[0] == '*' && this.pieceMap[info.pieces - 1] == '*';
-        }
-
-        return info;
-      }
     };
 
-    torrent.metadataTimeout = setTimeout(function() {
-      console.log('[scrapmagnet] ' + torrent.dn + ': METADATA FAILED');
-      trackingEvent('Metadata failed', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
-      torrent.destroy();
-    }, 30000);
+    torrent.addConnection = function() {
+      this.connections++;
+      // console.log('[scrapmagnet] ' + this.dn + ': CONNECTION ADDED: ' + this.connections);
+
+      if (this.mainFile && this.paused) {
+        this.mainFile.select();
+        this.paused = false;
+        console.log('[scrapmagnet] ' + this.dn + ': RESUMED');
+      }
+
+      clearTimeout(this.pauseTimeout);
+      clearTimeout(this.removeTimeout);
+    };
+
+    torrent.removeConnection = function() {
+      this.connections--;
+      // console.log('[scrapmagnet] ' + this.dn + ': CONNECTION REMOVED: ' + this.connections);
+
+      if (this.connections == 0) {
+        var self = this;
+        this.pauseTimeout = setTimeout(function() {
+          if (self.mainFile && !self.paused) {
+            self.mainFile.deselect();
+            self.paused = true;
+            console.log('[scrapmagnet] ' + self.dn + ': PAUSED');
+          }
+          self.removeTimeout = setTimeout(function() {
+            self.destroy();
+          }, 20000);
+        }, 10000);
+      }
+
+      clearTimeout(this.servingTimeout);
+    };
+
+    torrent.getInfo = function() {
+      var info = {
+        dn:             this.dn,
+        info_hash:      this.infoHash,
+        state:          this.state,
+        paused:         this.paused,
+        downloaded:     this.engine.swarm.downloaded,
+        uploaded:       this.engine.swarm.uploaded,
+        download_speed: this.engine.swarm.downloadSpeed() / 1024,
+        upload_speed:   this.engine.swarm.uploadSpeed() / 1024,
+        peers:          this.engine.swarm.wires.length,
+      };
+
+      if (this.state == 'downloading') {
+        info.files = [];
+
+        var self = this;
+        this.engine.files.forEach(function(file) {
+          info.files.push({ path: file.path, size: file.length, main: (file.path == self.mainFile.path) });
+        });
+
+        info.pieces       = this.engine.torrent.pieces.length,
+        info.piece_length = this.engine.torrent.pieceLength,
+        info.piece_map    = Array(Math.ceil(info.pieces / 100));
+
+        for (var i = 0; i < info.piece_map.length; i++)
+          info.piece_map[i] = '';
+
+        for (var i = 0; i < info.pieces; i++)
+          info.piece_map[Math.floor(i / 100)] += this.pieceMap[i];
+
+        info.video_ready = this.pieceMap[0] == '*' && this.pieceMap[info.pieces - 1] == '*';
+      }
+
+      return info;
+    };
+
+    torrent.engine.on('verify', function(pieceIndex) {
+      torrent.pieceMap[pieceIndex] = '*';
+    });
+
+    torrent.engine.on('idle', function() {
+      if (torrent.state == 'downloading' && !torrent.paused) {
+        torrent.state = 'finished';
+
+        console.log('[scrapmagnet] ' + torrent.dn + ': FINISHED');
+        trackingEvent('Finished', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
+      }
+    });
+
+    torrent.destroy = function(callback) {
+      var self = this;
+      this.engine.destroy(function() {
+        console.log('[scrapmagnet] ' + self.dn + ': REMOVED');
+        trackingEvent('Removed', { 'Magnet InfoHash': self.infoHash, 'Magnet Name': self.dn }, self.mixpanelData);
+        if (!commander.keep) {
+          self.engine.remove(function() {
+            console.log('[scrapmagnet] ' + self.dn + ': DELETED');
+            delete torrents[self.infoHash];
+            if (callback)
+              callback();
+          });
+        } else {
+          delete torrents[self.infoHash];
+          if (callback)
+            callback();
+        }
+      });
+    };
 
     torrent.engine.on('ready', function() {
-      torrent.ready = true;
+      torrent.state = 'downloading';
 
       // Select main file
       torrent.engine.files.forEach(function(file) {
@@ -284,33 +312,16 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
       trackingEvent('Metadata received', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
     });
 
-    torrent.engine.on('verify', function(pieceIndex) {
-      torrent.pieceMap[pieceIndex] = '*';
-    });
+    torrent.metadataTimeout = setTimeout(function() {
+      torrent.state = 'failed';
+      console.log('[scrapmagnet] ' + torrent.dn + ': METADATA FAILED');
+      trackingEvent('Metadata failed', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
+    }, 20000);
 
-    torrent.engine.on('idle', function() {
-      if (!torrent.finished && !torrent.paused) {
-        torrent.finished = true;
-        console.log('[scrapmagnet] ' + torrent.dn + ': FINISHED');
-        trackingEvent('Finished', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
-      }
-    });
-
-    torrent.servingInterval = setInterval(function() {
-      if (torrent.engine.swarm.downloaded > (10 * 1024 * 1024)) {
-        console.log('[scrapmagnet] ' + torrent.dn + ': SERVING');
-        trackingEvent('Serving', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
-        clearInterval(torrent.servingInterval);
-        torrent.servingInterval = undefined;
-      }
-
-    }, 5000);
+    torrents[torrent.infoHash] = torrent;
 
     console.log('[scrapmagnet] ' + torrent.dn + ': ADDED');
     trackingEvent('Added', { 'Magnet InfoHash': torrent.infoHash, 'Magnet Name': torrent.dn }, torrent.mixpanelData);
-    torrents[magnetData.infoHash] = torrent;
-  } else {
-    torrents[magnetData.infoHash].removeConnection();
   }
 
   return torrents[magnetData.infoHash];
@@ -319,14 +330,25 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
 // ----------------------------------------------------------------------------
 
 if (commander.ppid != -1)
-setInterval(function() {
-  if (!isRunning(commander.ppid))
-    shutdown();
+  setInterval(function() {
+    if (!isRunning(commander.ppid))
+      shutdown();
+  });
+
+process.on('SIGINT', function() {
+  shutdown();
 });
 
 function shutdown() {
-  console.log('[scrapmagnet] Stopping');
-  process.exit();
+  async.forEachOf(torrents,
+    function(value, key, callback) {
+      value.destroy(callback);
+    },
+    function() {
+      console.log('[scrapmagnet] Stopping');
+      process.exit();
+    }
+  );
 }
 
 var server = app.listen(commander.port, function() {
