@@ -16,11 +16,17 @@ var torrentStream = require('torrent-stream');
 
 // ----------------------------------------------------------------------------
 
+var PRELOAD_RATIO = 0.005;
+
+// ----------------------------------------------------------------------------
+
 commander
   .version('0.1.2')
   .option('-p, --port <port>', 'HTTP server port [8042]', Number, 8042)
   .option('-k, --keep', 'Keep downloaded files upon stopping')
   .option('-i, --ppid <ppid>', 'Parent PID to monitor for auto-shutdown', Number, -1)
+  .option('-a, --inactivity-pause-timeout <timeout>', 'Torrents will be paused after some inactivity', Number, 10)
+  .option('-r, --inactivity-remove-timeout <timeout>', 'Torrents will be removed after some inactivity', Number, 20)
   .option('-t, --mixpanel-token <token>', 'Mixpanel token')
   .option('-d, --mixpanel-data <data>', 'Mixpanel data')
   .parse(process.argv);
@@ -213,8 +219,8 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
           }
           self.removeTimeout = setTimeout(function() {
             self.destroy();
-          }, 20000);
-        }, 10000);
+          }, commander.inactivityRemoveTimeout * 1000);
+        }, commander.inactivityPauseTimeout * 1000);
       }
 
       clearTimeout(this.servingTimeout);
@@ -241,9 +247,10 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
           info.files.push({ path: file.path, size: file.length, main: (file.path == self.mainFile.path) });
         });
 
-        info.pieces       = this.engine.torrent.pieces.length,
-        info.piece_length = this.engine.torrent.pieceLength,
-        info.piece_map    = Array(Math.ceil(info.pieces / 100));
+        info.pieces         = this.engine.torrent.pieces.length;
+        info.pieces_preload = Math.round(info.pieces * PRELOAD_RATIO);
+        info.piece_length   = this.engine.torrent.pieceLength;
+        info.piece_map      = Array(Math.ceil(info.pieces / 100));
 
         for (var i = 0; i < info.piece_map.length; i++)
           info.piece_map[i] = '';
@@ -251,7 +258,12 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
         for (var i = 0; i < info.pieces; i++)
           info.piece_map[Math.floor(i / 100)] += this.pieceMap[i];
 
-        info.video_ready = this.pieceMap[0] == '*' && this.pieceMap[info.pieces - 1] == '*';
+        info.video_ready = this.pieceMap[info.pieces - 1] == '*';
+        for (var i = 0; i < info.pieces_preload; i++) {
+          if (this.pieceMap[i] != '*') {
+            info.video_ready = false;
+          }
+        }
       }
 
       return info;
@@ -299,7 +311,7 @@ function addTorrent(magnetLink, downloadDir, mixpanelData) {
           torrent.mainFile = file;
       });
       torrent.mainFile.select();
-      torrent.engine.select(0, Math.min(2, torrent.engine.torrent.pieces.length - 1), true);
+      torrent.engine.select(0, Math.round(torrent.engine.torrent.pieces.length * PRELOAD_RATIO), true);
       torrent.engine.select(torrent.engine.torrent.pieces.length - 1, torrent.engine.torrent.pieces.length - 1, true);
 
       // Initialize piece map
