@@ -21,7 +21,7 @@ var PRELOAD_RATIO = 0.005;
 // ----------------------------------------------------------------------------
 
 commander
-  .version('0.1.2')
+  .version('0.1.3')
   .option('-p, --port <port>', 'HTTP server port [8042]', Number, 8042)
   .option('-k, --keep', 'Keep downloaded files upon stopping')
   .option('-i, --ppid <ppid>', 'Parent PID to monitor for auto-shutdown', Number, -1)
