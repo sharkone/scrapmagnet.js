@@ -345,7 +345,7 @@ if (commander.ppid != -1)
   setInterval(function() {
     if (!isRunning(commander.ppid))
       shutdown();
-  });
+  }, 1000);
 
 process.on('SIGINT', function() {
   shutdown();
